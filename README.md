@@ -1,2 +1,3 @@
 # Data-Structures-team-project-
-idk how to use this anymore 
+Team project for CSE-2010 
+goal: creating a search algorithm which a set dictionary of words already in use, then proceeds to find the matches of a set dictionary similar to (Control + F) 

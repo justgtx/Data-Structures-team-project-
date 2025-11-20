@@ -1,9 +1,11 @@
 /*
 Authors (group members):
+Edwin Cordova, Jackson Neering, Gio Williams, Basil Salem
 Email addresses of group members:
-Group name:
-Course:
-Section:
+jneering2023@my.fit.edu, gwilliams2024@my.fit.edu,
+Group name: A Boogie No Hoodie
+Course: 2010
+Section: 3/4
 Description of the overall algorithm:
 This implementation uses a Trie (prefix tree) data structure to efficiently store
 and retrieve query predictions. Each node in the Trie stores a character and maintains
@@ -221,7 +223,8 @@ public class QuerySidekick
 				guesses[i] = null;
 			}
 		}
-		
+		//insertQuery(currentPrefix);
+//		buildCache();
 		return guesses;
 	}
 	

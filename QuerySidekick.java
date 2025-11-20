@@ -23,6 +23,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+//Gonna try to find an optimal strategy to add data while iterating over the new lines
+//Hopefully it will work
+
 public class QuerySidekick
 {
 	String[] guesses = new String[5]; // 5 guesses from QuerySidekick
@@ -223,7 +226,7 @@ public class QuerySidekick
 				guesses[i] = null;
 			}
 		}
-		//insertQuery(currentPrefix);
+		insertQuery(currentPrefix);
 //		buildCache();
 		return guesses;
 	}

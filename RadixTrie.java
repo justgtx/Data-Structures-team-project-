@@ -89,8 +89,8 @@ public class RadixTrie {
         return len;
     }
 
-//    public ArrayList<String> search(String prefix){
-//
-//    }
+    public ArrayList<String> search(String prefix){
+
+    }
 
 }

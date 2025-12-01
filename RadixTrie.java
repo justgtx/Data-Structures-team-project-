@@ -1,3 +1,4 @@
+//arraylist of common words
 import java.lang.reflect.Array;
 import java.util.HashMap;
 import java.util.Map;
@@ -94,3 +95,4 @@ public class RadixTrie {
 //    }
 
 }
+

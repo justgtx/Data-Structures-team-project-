@@ -13,15 +13,9 @@ a frequency count for complete queries ending at that node. When guessing, we tr
 the Trie based on the current prefix and return the top 5 most frequent queries.
 The feedback method allows dynamic updates to improve predictions over time.
 */
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.io.*;
+import java.util.*; //Arraylist,collections,comparators,hashmap,list,map in use
+
 
 public class QuerySidekick
 {

@@ -1,25 +1,16 @@
 /*
-Authors (group members):
-Email addresses of group members:
-Group name:
-Course:
-Section:
-Description of the overall algorithm:
-RADIX TRIE (Compressed Trie) Implementation:
-Instead of one node per character, we compress chains into edge labels.
-Example: "algorithm" → Single edge with label "algorithm" instead of 9 nodes
-Benefits: Less memory, potentially faster navigation
-Maintains same accuracy and ranking logic as baseline
+SORTED CHUNK + SHORT[] IDS
+- Use sorted chunk for cache building (no object explosion)
+- Use short[] instead of String[] for topSuggestions
+- Query IDs are just the index in the sorted array!
+- No HashMap needed for ID mapping!
 */
 
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
+import java.util.Arrays;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 public class QuerySidekick
@@ -30,281 +21,291 @@ public class QuerySidekick
 	
 	private static final double FREQUENCY_EXPONENT = 1.0;
 	
-	// Radix Trie Node with edge labels
-	private class RadixNode {
-		Map<Character, RadixEdge> children; // First char → edge (lazy init)
-		boolean isEndOfQuery;
-		int frequency;
-		String query;
-		String[] topSuggestions;
+	// Query pool - persists after buildCache for lookups
+	private String[] queryPool;
+	private short[] queryFrequencies;
+	
+	// Reusable arrays for finding top 5
+	private final short[] tempTop5Ids = new short[5];
+	private final double[] tempScores = new double[5];
+	private final int[] tempFreqs = new int[5];
+	
+	private abstract class RadixNode {
+		short[] topSuggestionIds;  // short[] instead of String[]!
 		
-		public RadixNode() {
-			children = null;  // Lazy initialization - only create when needed!
-			isEndOfQuery = false;
-			frequency = 0;
-			query = null;
-			topSuggestions = null;
+		abstract RadixEdge findChild(char ch);
+		abstract RadixNode addChildAndGetNode(char ch, RadixEdge edge);
+		
+		void copyDataTo(RadixNode other) {
+			other.topSuggestionIds = this.topSuggestionIds;
 		}
 	}
 	
-	// Edge with label (can be multiple characters)
+	private class LeafNode extends RadixNode {
+		@Override RadixEdge findChild(char ch) { return null; }
+		@Override RadixNode addChildAndGetNode(char ch, RadixEdge edge) {
+			ChainNode n = new ChainNode(); copyDataTo(n);
+			n.childChar = ch; n.childEdge = edge; return n;
+		}
+	}
+	
+	private class ChainNode extends RadixNode {
+		char childChar; RadixEdge childEdge;
+		@Override RadixEdge findChild(char ch) { return (childChar == ch) ? childEdge : null; }
+		@Override RadixNode addChildAndGetNode(char ch, RadixEdge edge) {
+			BranchNode n = new BranchNode(); copyDataTo(n);
+			n.childChars = new char[]{childChar, ch};
+			n.childEdges = new RadixEdge[]{childEdge, edge}; return n;
+		}
+	}
+	
+	private class BranchNode extends RadixNode {
+		char[] childChars; RadixEdge[] childEdges;
+		@Override RadixEdge findChild(char ch) {
+			for (int i = 0; i < childChars.length; i++)
+				if (childChars[i] == ch) return childEdges[i];
+			return null;
+		}
+		@Override RadixNode addChildAndGetNode(char ch, RadixEdge edge) {
+			int len = childChars.length;
+			childChars = Arrays.copyOf(childChars, len + 1);
+			childEdges = Arrays.copyOf(childEdges, len + 1);
+			childChars[len] = ch; childEdges[len] = edge; return this;
+		}
+	}
+	
 	private class RadixEdge {
-		String label; // e.g., "lgorithm" instead of individual nodes
-		RadixNode node;
-		
-		public RadixEdge(String label, RadixNode node) {
-			this.label = label;
-			this.node = node;
-		}
+		String label; RadixNode node;
+		RadixEdge(String label, RadixNode node) { this.label = label; this.node = node; }
 	}
 	
-	private class QuerySuggestion {
-		String query;
-		int frequency;
-		double score;
-		
-		public QuerySuggestion(String query, int frequency) {
-			this.query = query;
-			this.frequency = frequency;
-			this.score = Math.pow(frequency, FREQUENCY_EXPONENT) / query.length();
-		}
-	}
+	private RadixEdge rootEdge;
 	
-	public QuerySidekick()
-	{
-		root = new RadixNode();
+	public QuerySidekick() {
+		root = new LeafNode();
+		rootEdge = new RadixEdge("", root);
 		currentPrefix = "";
 	}
 	
-	// Insert into Radix Trie
-	private void insertQuery(String query) {
+	private void insertQuery(String query, Map<String, Integer> freqMap) {
 		if (query == null || query.isEmpty()) return;
-		query = query.toLowerCase().intern();
-		
-		insertRadix(root, query, 0);
+		query = query.toLowerCase();
+		freqMap.put(query, freqMap.getOrDefault(query, 0) + 1);
+		insertRadix(rootEdge, query, 0);
+		root = rootEdge.node;
 	}
 	
-	private void insertRadix(RadixNode node, String query, int depth) {
+	private void insertRadix(RadixEdge parentEdge, String query, int depth) {
+		RadixNode node = parentEdge.node;
 		if (depth == query.length()) {
-			node.isEndOfQuery = true;
-			node.frequency++;
-			node.query = query;
-			return;
+			return; // End of query, node exists
 		}
-		
 		char firstChar = query.charAt(depth);
-		
-		// Lazy init: create children HashMap only when needed
-		if (node.children == null) {
-			node.children = new HashMap<>();
-		}
-		
-		// No edge starting with this character - create new one
-		if (!node.children.containsKey(firstChar)) {
-			RadixNode newNode = new RadixNode();
-			String remainingLabel = query.substring(depth);
-			node.children.put(firstChar, new RadixEdge(remainingLabel, newNode));
-			newNode.isEndOfQuery = true;
-			newNode.frequency = 1;
-			newNode.query = query;
+		RadixEdge edge = node.findChild(firstChar);
+		if (edge == null) {
+			LeafNode newNode = new LeafNode();
+			RadixEdge newEdge = new RadixEdge(query.substring(depth).intern(), newNode);
+			RadixNode upgraded = node.addChildAndGetNode(firstChar, newEdge);
+			if (upgraded != node) parentEdge.node = upgraded;
 			return;
 		}
-		
-		// Edge exists - check for common prefix
-		RadixEdge edge = node.children.get(firstChar);
 		String edgeLabel = edge.label;
-		int matchLen = 0;
-		int maxLen = Math.min(edgeLabel.length(), query.length() - depth);
-		
-		while (matchLen < maxLen && edgeLabel.charAt(matchLen) == query.charAt(depth + matchLen)) {
-			matchLen++;
-		}
-		
-		// Full match - continue down
+		int matchLen = 0, maxLen = Math.min(edgeLabel.length(), query.length() - depth);
+		while (matchLen < maxLen && edgeLabel.charAt(matchLen) == query.charAt(depth + matchLen)) matchLen++;
 		if (matchLen == edgeLabel.length()) {
-			insertRadix(edge.node, query, depth + matchLen);
+			insertRadix(edge, query, depth + matchLen);
 			return;
 		}
-		
-		// Partial match - need to split edge
-		String commonPrefix = edgeLabel.substring(0, matchLen);
-		String oldSuffix = edgeLabel.substring(matchLen);
-		String newSuffix = (depth + matchLen < query.length()) ? 
-		                   query.substring(depth + matchLen) : "";
-		
-		// Create intermediate node
-		RadixNode splitNode = new RadixNode();
-		
-		// Old edge now points to split with remaining label
+		String commonPrefix = edgeLabel.substring(0, matchLen).intern();
+		String oldSuffix = edgeLabel.substring(matchLen).intern();
+		String newSuffix = (depth + matchLen < query.length()) ? query.substring(depth + matchLen).intern() : "";
+		RadixNode splitNode = new LeafNode();
 		edge.label = commonPrefix;
 		RadixNode oldTarget = edge.node;
 		edge.node = splitNode;
-		
-		// Add old suffix as child of split
-		if (splitNode.children == null) {
-			splitNode.children = new HashMap<>();
-		}
-		splitNode.children.put(oldSuffix.charAt(0), new RadixEdge(oldSuffix, oldTarget));
-		
-		// Add new suffix
-		if (newSuffix.isEmpty()) {
-			// Query ends at split point
-			splitNode.isEndOfQuery = true;
-			splitNode.frequency = 1;
-			splitNode.query = query;
-		} else {
-			// Continue with new branch
-			RadixNode newNode = new RadixNode();
-			if (splitNode.children == null) {
-				splitNode.children = new HashMap<>();
-			}
-			splitNode.children.put(newSuffix.charAt(0), new RadixEdge(newSuffix, newNode));
-			newNode.isEndOfQuery = true;
-			newNode.frequency = 1;
-			newNode.query = query;
+		splitNode = splitNode.addChildAndGetNode(oldSuffix.charAt(0), new RadixEdge(oldSuffix, oldTarget)); // oldSuffix already interned
+		edge.node = splitNode;
+		if (!newSuffix.isEmpty()) {
+			LeafNode newNode = new LeafNode();
+			RadixNode upgraded = splitNode.addChildAndGetNode(newSuffix.charAt(0), new RadixEdge(newSuffix, newNode));
+			if (upgraded != splitNode) edge.node = upgraded;
 		}
 	}
 	
+	// Build sorted arrays - IDs are just the sorted index!
+	private void buildSortedArrays(Map<String, Integer> freqMap) {
+		int n = freqMap.size();
+		
+		// Extract entries directly into arrays (sorted by key)
+		String[] keys = freqMap.keySet().toArray(new String[0]);
+		Arrays.sort(keys);
+		
+		queryPool = new String[n];
+		queryFrequencies = new short[n];
+		for (int i = 0; i < n; i++) {
+			queryPool[i] = keys[i].intern();
+			queryFrequencies[i] = (short) Math.min(freqMap.get(keys[i]), Short.MAX_VALUE);
+		}
+		keys = null; // Help GC
+	}
+	
+	// Binary search: find first index where query >= prefix
+	private int findChunkStart(String prefix) {
+		int lo = 0, hi = queryPool.length;
+		while (lo < hi) {
+			int mid = (lo + hi) / 2;
+			if (queryPool[mid].compareTo(prefix) < 0) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo;
+	}
+	
+	// Check if query starts with prefix
+	private boolean startsWith(String query, String prefix) {
+		if (query.length() < prefix.length()) return false;
+		for (int i = 0; i < prefix.length(); i++)
+			if (query.charAt(i) != prefix.charAt(i)) return false;
+		return true;
+	}
+	
+	// Find top 5 IDs for a prefix - NO OBJECT CREATION!
+	private void findTop5IdsForPrefix(String prefix) {
+		// Reset temp arrays
+		for (int i = 0; i < 5; i++) {
+			tempTop5Ids[i] = -1;
+			tempScores[i] = Double.NEGATIVE_INFINITY;
+			tempFreqs[i] = 0;
+		}
+		
+		// Binary search to find start of chunk
+		int start = findChunkStart(prefix);
+		
+		// Scan forward while queries match prefix
+		for (int i = start; i < queryPool.length; i++) {
+			if (!startsWith(queryPool[i], prefix)) break;
+			
+			String query = queryPool[i];
+			int freq = queryFrequencies[i];
+			double score = Math.pow(freq, FREQUENCY_EXPONENT) / query.length();
+			insertIntoTop5((short)i, query, score, freq);
+		}
+	}
+	
+	// Insert into top 5 maintaining sorted order
+	private void insertIntoTop5(short id, String query, double score, int freq) {
+		int pos = -1;
+		for (int i = 0; i < 5; i++) {
+			if (tempTop5Ids[i] < 0) { pos = i; break; }
+			if (score > tempScores[i]) { pos = i; break; }
+			if (score == tempScores[i]) {
+				if (freq > tempFreqs[i]) { pos = i; break; }
+				if (freq == tempFreqs[i] && query.compareTo(queryPool[tempTop5Ids[i]]) < 0) { pos = i; break; }
+			}
+		}
+		if (pos == -1) return;
+		for (int i = 4; i > pos; i--) {
+			tempTop5Ids[i] = tempTop5Ids[i-1];
+			tempScores[i] = tempScores[i-1];
+			tempFreqs[i] = tempFreqs[i-1];
+		}
+		tempTop5Ids[pos] = id;
+		tempScores[pos] = score;
+		tempFreqs[pos] = freq;
+	}
+	
+	// Build cache using short[] IDs
 	private void buildCache() {
-		buildCacheRecursive(root);
+		buildCacheRecursive(root, "");
 	}
 	
-	private void buildCacheRecursive(RadixNode node) {
+	private void buildCacheRecursive(RadixNode node, String pathSoFar) {
 		if (node == null) return;
 		
-		List<QuerySuggestion> allSuggestions = new ArrayList<>();
-		collectAllQueries(node, allSuggestions);
+		// Find top 5 IDs for this prefix
+		findTop5IdsForPrefix(pathSoFar);
 		
-		Collections.sort(allSuggestions, new Comparator<QuerySuggestion>() {
-			@Override
-			public int compare(QuerySuggestion a, QuerySuggestion b) {
-				int scoreComp = Double.compare(b.score, a.score);
-				if (scoreComp != 0) return scoreComp;
-				if (a.frequency != b.frequency) return b.frequency - a.frequency;
-				return a.query.compareTo(b.query);
-			}
-		});
+		// Count valid entries
+		int count = 0;
+		for (int i = 0; i < 5; i++) if (tempTop5Ids[i] >= 0) count++;
 		
-		int count = Math.min(5, allSuggestions.size());
+		// Store as short[] instead of String[]!
 		if (count > 0) {
-			node.topSuggestions = new String[count];
+			node.topSuggestionIds = new short[count];
 			for (int i = 0; i < count; i++) {
-				node.topSuggestions[i] = allSuggestions.get(i).query;
+				node.topSuggestionIds[i] = tempTop5Ids[i];
 			}
 		}
 		
-		if (node.children != null) {
-			for (RadixEdge edge : node.children.values()) {
-				buildCacheRecursive(edge.node);
-			}
-		}
-	}
-	
-	private void collectAllQueries(RadixNode node, List<QuerySuggestion> suggestions) {
-		if (node == null) return;
-		
-		if (node.isEndOfQuery) {
-			suggestions.add(new QuerySuggestion(node.query, node.frequency));
-		}
-		
-		if (node.children != null) {
-			for (RadixEdge edge : node.children.values()) {
-				collectAllQueries(edge.node, suggestions);
+		// Recurse to children
+		if (node instanceof ChainNode) {
+			ChainNode cn = (ChainNode) node;
+			buildCacheRecursive(cn.childEdge.node, pathSoFar + cn.childEdge.label);
+		} else if (node instanceof BranchNode) {
+			BranchNode bn = (BranchNode) node;
+			for (RadixEdge edge : bn.childEdges) {
+				buildCacheRecursive(edge.node, pathSoFar + edge.label);
 			}
 		}
 	}
 	
-	public void processOldQueries(String oldQueryFile)
-	{
+	public void processOldQueries(String oldQueryFile) {
+		Map<String, Integer> freqMap = new HashMap<>();
 		try (BufferedReader reader = new BufferedReader(new FileReader(oldQueryFile))) {
 			String line;
 			while ((line = reader.readLine()) != null) {
 				line = line.replaceAll("\\s+", " ").trim();
-				if (!line.isEmpty()) {
-					insertQuery(line);
-				}
+				if (!line.isEmpty()) insertQuery(line, freqMap);
 			}
+			// Build sorted arrays (queryPool persists for lookups!)
+			buildSortedArrays(freqMap);
+			freqMap = null;
+			// Build cache with short[] IDs
 			buildCache();
+			// DON'T free queryPool - we need it for guess()!
+			// But we can free queryFrequencies
+			queryFrequencies = null;
+			// Force garbage collection to reduce peak memory
+			System.gc();
 		} catch (IOException e) {
-			System.err.println("Error reading old queries file: " + e.getMessage());
+			System.err.println("Error: " + e.getMessage());
 		}
 	}
 	
-	// Navigate Radix Trie with prefix matching
-	private String[] findTopQueries(String prefix) {
+	private short[] findTopIds(String prefix) {
 		RadixNode current = root;
 		int matched = 0;
-		
 		while (matched < prefix.length()) {
-			char nextChar = prefix.charAt(matched);
-			
-			// Check if node has any children
-			if (current.children == null || !current.children.containsKey(nextChar)) {
-				return new String[0];
-			}
-			
-			RadixEdge edge = current.children.get(nextChar);
+			RadixEdge edge = current.findChild(prefix.charAt(matched));
+			if (edge == null) return null;
 			String label = edge.label;
-			
-			// Check how much of the label matches remaining prefix
-			int remainingPrefix = prefix.length() - matched;
-			int toCheck = Math.min(label.length(), remainingPrefix);
-			
-			for (int i = 0; i < toCheck; i++) {
-				if (label.charAt(i) != prefix.charAt(matched + i)) {
-					// Prefix doesn't match this edge
-					return new String[0];
-				}
-			}
-			
+			int toCheck = Math.min(label.length(), prefix.length() - matched);
+			for (int i = 0; i < toCheck; i++)
+				if (label.charAt(i) != prefix.charAt(matched + i)) return null;
 			matched += toCheck;
-			
-			if (matched < prefix.length()) {
-				// Need to continue down
-				current = edge.node;
-			} else if (toCheck < label.length()) {
-				// Prefix ends in middle of edge - use edge's target node
-				current = edge.node;
-			} else {
-				// Matched entire edge label
-				current = edge.node;
-			}
+			current = edge.node;
 		}
-		
-		if (current.topSuggestions != null) {
-			return current.topSuggestions;
-		}
-		return new String[0];
+		return current.topSuggestionIds;
 	}
 	
-	public String[] guess(char currChar, int currCharPosition)
-	{
+	public String[] guess(char currChar, int currCharPosition) {
 		currChar = Character.toLowerCase(currChar);
+		currentPrefix = (currCharPosition == 0) ? "" + currChar : currentPrefix + currChar;
 		
-		if (currCharPosition == 0) {
-			currentPrefix = "" + currChar;
-		} else {
-			currentPrefix = currentPrefix + currChar;
-		}
+		short[] topIds = findTopIds(currentPrefix);
 		
-		String[] topQueries = findTopQueries(currentPrefix);
-		
+		// Convert short IDs to strings using queryPool
 		for (int i = 0; i < 5; i++) {
-			if (i < topQueries.length) {
-				guesses[i] = topQueries[i];
+			if (topIds != null && i < topIds.length && topIds[i] >= 0) {
+				guesses[i] = queryPool[topIds[i]];  // O(1) lookup!
 			} else {
 				guesses[i] = null;
 			}
 		}
-		
 		return guesses;
 	}
 	
-	public void feedback(boolean isCorrectGuess, String correctQuery)
-	{
-		if (correctQuery != null) {
-			currentPrefix = "";
-		}
+	public void feedback(boolean isCorrectGuess, String correctQuery) {
+		if (correctQuery != null) currentPrefix = "";
 	}
 }
 
